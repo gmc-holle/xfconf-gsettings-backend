@@ -1,0 +1,19 @@
+xfconf GSettings backend
+========================
+
+THIS BACKEND IS NOT WELL TESTED AND SHOULD NOT BE USED IN PRODUCTIVE ENVIRONMENTS!
+
+
+This is a simple GSettings backend using xfconf to store values.
+
+The channel in xfconf used to store these value is "xfconf-gsettings" but it may change.
+
+Even if this backend is not really smart but I would call it semi-smart as it tries to store the values in a way editable with xfce4-settings-editor. Basic types which can be mapped to a GType understood by xfconf will be converted to this type and written to xfconf. Types which are containers (e.g. arrays, dictionaries, tuples etc.) or are more complex (maybe types, nested types etc.) will be converted to string representation of their GVariant value and then stored as a string. Reading does some but the other way ;)
+
+To compile just run "make" in this directory.
+
+To run an application using GSettings to store its settings but using this backend, you can use the shell script "_run_with_xfconf_backend.sh" followed by the path to the application and the arguments which should be passed to the application, e.g.: `./_run_with_xfconf_backend.sh mousepad`
+
+Currently this backend passes all tests of Glib 2.40 on GSettings (see /gio/tests/gsettings.c in Glib sources). But it may not work and malfunction with real application. So please be warned!
+
+If you are brave to give it a try please report any bugs or misbehaviours.
