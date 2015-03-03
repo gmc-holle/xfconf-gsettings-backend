@@ -123,6 +123,90 @@ static GType _xfconf_settings_backend_gtype_from_gvariant_type(const GVariantTyp
 	return(G_TYPE_INVALID);
 }
 
+/* Store a value in xfconf */
+static gboolean _xfconf_settings_backend_write_internal(GSettingsBackend *inBackend,
+														const gchar *inKey,
+														GVariant *inValue,
+														gpointer inOriginTag)
+{
+	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
+	GValue						xfconfValue=G_VALUE_INIT;
+	GType						xfconfValueType;
+	gboolean					success;
+
+g_message("%s: Writing key '%s'", __func__, inKey);
+
+	/* Get GType of property value for variant */
+	xfconfValueType=_xfconf_settings_backend_gtype_from_gvariant_type(g_variant_get_type(inValue));
+
+	/* If variant type could not be mapped to a GType than get a string
+	 * representation of variant which will be store instead ...
+	 */
+	if(xfconfValueType==G_TYPE_INVALID)
+	{
+		gchar					*variantString;
+
+		/* Get string representation of variant */
+		variantString=g_variant_print(inValue, FALSE);
+
+		/* Set up property value */
+		g_value_init(&xfconfValue, G_TYPE_STRING);
+		g_value_set_string(&xfconfValue, variantString);
+		g_message("%s: Writing key '%s' with string representation '%s'", __func__, inKey, variantString);
+
+		/* Release allocated resources */
+		g_free(variantString);
+	}
+		/* ... otherwise the variant can be simply converted */
+		else
+		{
+			/* Convert variant to GValue */
+			g_dbus_gvariant_to_gvalue(inValue, &xfconfValue);
+			g_message("%s: Writing key '%s' with converted value", __func__, inKey);
+		}
+
+	/* Store value in xfconf */
+	success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
+	{
+		gchar					*valueStr;
+
+		valueStr=g_strdup_value_contents(&xfconfValue);
+		g_message("%s: Key '%s' with value '%s' -> %s", __func__, inKey, valueStr, success ? "success" : "failed");
+		g_free(valueStr);
+	}
+
+	/* Release allocated resources */
+	g_value_unset(&xfconfValue);
+
+	/* Return success result */
+	return(success);
+}
+
+/* Reset a value in xfconf */
+static gboolean _xfconf_settings_backend_reset_internal(GSettingsBackend *inBackend,
+														const gchar *inKey,
+														gpointer inOriginTag)
+{
+	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
+	gboolean					doRecursive=TRUE;
+
+	g_message("%s: Resetting value of key '%s'", __func__, inKey);
+
+	/* If key does not exists return FALSE here */
+	if(!xfconf_channel_has_property(self->channel, inKey))
+	{
+		g_message("%s: Cannot reset value of non-existing key '%s'", __func__, inKey);
+		return(FALSE);
+	}
+
+	/* Reset value in xfconf */
+	xfconf_channel_reset_property(self->channel, inKey, doRecursive);
+
+	/* Return success result */
+	return(TRUE);
+}
+
+
 /* IMPLEMENTATION: GSettingsBackend */
 
 /* Read a value from xfconf */
@@ -216,64 +300,6 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 }
 
 /* Store a value to xfconf */
-static gboolean _xfconf_settings_backend_write_internal(GSettingsBackend *inBackend,
-														const gchar *inKey,
-														GVariant *inValue,
-														gpointer inOriginTag)
-{
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-	GValue						xfconfValue=G_VALUE_INIT;
-	GType						xfconfValueType;
-	gboolean					success;
-
-g_message("%s: Writing key '%s'", __func__, inKey);
-
-	/* Get GType of property value for variant */
-	xfconfValueType=_xfconf_settings_backend_gtype_from_gvariant_type(g_variant_get_type(inValue));
-
-	/* If variant type could not be mapped to a GType than get a string
-	 * representation of variant which will be store instead ...
-	 */
-	if(xfconfValueType==G_TYPE_INVALID)
-	{
-		gchar					*variantString;
-
-		/* Get string representation of variant */
-		variantString=g_variant_print(inValue, FALSE);
-
-		/* Set up property value */
-		g_value_init(&xfconfValue, G_TYPE_STRING);
-		g_value_set_string(&xfconfValue, variantString);
-		g_message("%s: Writing key '%s' with string representation '%s'", __func__, inKey, variantString);
-
-		/* Release allocated resources */
-		g_free(variantString);
-	}
-		/* ... otherwise the variant can be simply converted */
-		else
-		{
-			/* Convert variant to GValue */
-			g_dbus_gvariant_to_gvalue(inValue, &xfconfValue);
-			g_message("%s: Writing key '%s' with converted value", __func__, inKey);
-		}
-
-	/* Store value in xfconf */
-	success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
-	{
-		gchar					*valueStr;
-
-		valueStr=g_strdup_value_contents(&xfconfValue);
-		g_message("%s: Key '%s' with value '%s' -> %s", __func__, inKey, valueStr, success ? "success" : "failed");
-		g_free(valueStr);
-	}
-
-	/* Release allocated resources */
-	g_value_unset(&xfconfValue);
-
-	/* Return success result */
-	return(success);
-}
-
 static gboolean _xfconf_settings_backend_write(GSettingsBackend *inBackend,
 												const gchar *inKey,
 												GVariant *inValue,
@@ -326,9 +352,9 @@ static gboolean _xfconf_settings_backend_write_tree_callback(gpointer inKey,
 	}
 		else
 		{
-			_xfconf_settings_backend_reset((GSettingsBackend*)data->backend,
-											key,
-											data->originTag);
+			data->success=_xfconf_settings_backend_reset_internal((GSettingsBackend*)data->backend,
+																	key,
+																	data->originTag);
 		}
 
 	/* Return TRUE if writing failed to stop traversal on tree */
@@ -431,15 +457,15 @@ static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 											gpointer inOriginTag)
 {
 	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-	gboolean					doRecursive=TRUE;
+	gboolean					success;
 
 	g_message("%s: Resetting value of key '%s'", __func__, inKey);
 
 	/* Reset value in xfconf */
-	xfconf_channel_reset_property(self->channel, inKey, doRecursive);
+	success=_xfconf_settings_backend_reset_internal(inBackend, inKey, inOriginTag);
 
-	/* Emit 'changed' signal because key has changed by resetting it */
-	g_settings_backend_changed(inBackend, inKey, inOriginTag);
+	/* Emit 'changed' signal if resetting was successful */
+	if(success) g_settings_backend_changed(inBackend, inKey, inOriginTag);
 }
 
 /* Get writable state of a key at xfconf */
