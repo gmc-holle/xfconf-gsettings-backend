@@ -308,10 +308,19 @@ static gboolean _xfconf_settings_backend_write(GSettingsBackend *inBackend,
 	gboolean		success;
 
 	/* Write value to xfconf */
-	success=_xfconf_settings_backend_write_internal(inBackend,
-														inKey,
-														inValue,
-														inOriginTag);
+	if(inValue)
+	{
+		success=_xfconf_settings_backend_write_internal(inBackend,
+															inKey,
+															inValue,
+															inOriginTag);
+	}
+		else
+		{
+			success=_xfconf_settings_backend_reset_internal(inBackend,
+																inKey,
+																inOriginTag);
+		}
 
 	/* Emit 'changed' signal if writing was successful */
 	if(success) g_settings_backend_changed(inBackend, inKey, inOriginTag);
