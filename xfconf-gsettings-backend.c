@@ -52,7 +52,6 @@ struct _XfconfSettingsBackendTreeWriteData
 	XfconfSettingsBackend		*backend;
 	gpointer					originTag;
 	GHashTable					*writtenKeys;
-	gboolean					success;
 };
 
 typedef struct _XfconfSettingsBackendTreeCollectKeysData	XfconfSettingsBackendTreeCollectKeysData;
@@ -337,12 +336,10 @@ static gboolean _xfconf_settings_backend_write_tree_callback(gpointer inKey,
 	XfconfSettingsBackendTreeWriteData		*data;
 	const gchar								*key;
 	GVariant								*variant;
+	gboolean								success;
 
 	/* Get callback data */
 	data=(XfconfSettingsBackendTreeWriteData*)inUserData;
-
-	/* If at any time writing a value has failed, stop writing any further values */
-	if(!data->success) return(FALSE);
 
 	/* Get key and value to write */
 	key=(const gchar*)inKey;
@@ -354,29 +351,27 @@ static gboolean _xfconf_settings_backend_write_tree_callback(gpointer inKey,
 	 */
 	if(variant)
 	{
-		data->success=_xfconf_settings_backend_write_internal((GSettingsBackend*)data->backend,
-																key,
-																variant,
-																data->originTag);
+		success=_xfconf_settings_backend_write_internal((GSettingsBackend*)data->backend,
+														key,
+														variant,
+														data->originTag);
 	}
 		else
 		{
-			data->success=_xfconf_settings_backend_reset_internal((GSettingsBackend*)data->backend,
-																	key,
-																	data->originTag);
+			success=_xfconf_settings_backend_reset_internal((GSettingsBackend*)data->backend,
+															key,
+															data->originTag);
 		}
 
-	/* Return TRUE if writing failed to stop traversal on tree */
-	if(!data->success) return(TRUE);
-
-	/* If writing was successful remember the modified key and return FALSE
-	 * to continue tree traversal.
-	 */
-	if(data->writtenKeys)
+	/* If writing was successful remember the modified key */
+	if(success && data->writtenKeys)
 	{
 		g_hash_table_insert(data->writtenKeys, g_strdup(key), GINT_TO_POINTER(1));
 	}
 
+	/* Return FALSE to continue tree traversal regardless if this write was
+	 * successful or not.
+	 */
 	return(FALSE);
 }
 
@@ -402,16 +397,18 @@ static gboolean _xfconf_settings_backend_write_tree(GSettingsBackend *inBackend,
 {
 	XfconfSettingsBackend						*self=(XfconfSettingsBackend*)inBackend;
 	XfconfSettingsBackendTreeWriteData			writeData;
+	gint										treeSize;
 	guint										modifiedKeysCount;
 	XfconfSettingsBackendTreeCollectKeysData	collectKeysData;
 
 	/* If tree is empty there is nothing to store and writing was successful */
-	if(g_tree_nnodes(inTree)==0)
+	treeSize=g_tree_nnodes(inTree);
+	if(treeSize==0)
 	{
 		g_message("%s: Empty tree", __func__);
 		return(TRUE);
 	}
-	g_message("%s: Writing tree with %d nodes", __func__, g_tree_nnodes(inTree));
+	g_message("%s: Writing tree with %d nodes", __func__, treeSize);
 
 	/* Write each value to xfconf */
 	writeData.backend=self;
@@ -420,7 +417,6 @@ static gboolean _xfconf_settings_backend_write_tree(GSettingsBackend *inBackend,
 												g_str_equal,
 												(GDestroyNotify)g_free,
 												NULL);
-	writeData.success=TRUE;
 	g_tree_foreach(inTree, _xfconf_settings_backend_write_tree_callback, &writeData);
 
 	/* Emit 'path-changed' signal with all modified keys regardless if writing
@@ -457,7 +453,7 @@ static gboolean _xfconf_settings_backend_write_tree(GSettingsBackend *inBackend,
 	g_hash_table_unref(writeData.writtenKeys);
 
 	/* Return success result */
-	return(writeData.success);
+	return(TRUE);
 }
 
 /* Reset a value in xfconf */
