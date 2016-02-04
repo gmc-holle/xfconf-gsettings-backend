@@ -1,6 +1,8 @@
 /*
  * Xfconf GSettings backend
  *
+ * Copyright 2015-2016 Stephan Haller <nomad@froevel.de>
+ *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
@@ -14,7 +16,7 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  *
- * Author: Stephan Haller <nomad@froevel.de>
+ *
  */
 
 // TODO: #include "config.h"
@@ -25,40 +27,72 @@
 
 #include <xfconf/xfconf.h>
 
-#include <string.h>
 
-#define XFCONF_SETTINGS_CHANNEL		"xfconf-gsettings"
+/* Definitions */
+#define XFCONF_SETTINGS_CHANNEL			"xfconf-gsettings"
+#define XFCONF_VARIANT_STRUCT_MAGIC		((guint32)('G' << 24 | 'V' << 16 | 'a' << 8 | 'r'))
+#define XFCONF_VARIANT_STRUCT_NAME		"xfconf-gsettings-variant-struct"
+
 
 /* Define this class in GObject system */
-typedef GSettingsBackendClass		XfconfSettingsBackendClass;
-
-typedef struct
+typedef struct _XfconfSettingsBackendClass					XfconfSettingsBackendClass;
+struct _XfconfSettingsBackendClass
 {
-	GSettingsBackend	backend;
+	/*< private >*/
+	/* Parent class */
+	GSettingsBackendClass	parent_class;
+};
 
-	XfconfChannel		*channel;
-} XfconfSettingsBackend;
+typedef struct _XfconfSettingsBackend						XfconfSettingsBackend;
+struct _XfconfSettingsBackend
+{
+	/* Parent instance */
+	GSettingsBackend		backend;
 
-static GType xfconf_settings_backend_get_type(void);
+	/* Private structure */
+	XfconfChannel			*channel;
+};
 
 G_DEFINE_TYPE(XfconfSettingsBackend,
 				xfconf_settings_backend,
 				G_TYPE_SETTINGS_BACKEND)
 
+#define XFCONF_TYPE_SETTINGS_BACKEND						(xfconf_settings_backend_get_type())
+#define XFCONF_SETTINGS_BACKEND(obj)						(G_TYPE_CHECK_INSTANCE_CAST((obj), XFCONF_TYPE_SETTINGS_BACKEND, XfconfSettingsBackend))
+
+
 /* IMPLEMENTATION: Private variables and methods */
+typedef struct _XfconfSettingsBackendTypeMapping			XfconfSettingsBackendTypeMapping;
+struct _XfconfSettingsBackendTypeMapping
+{
+	GType					type;
+	GType					subType;
+
+	const GVariantType		*variantType;
+	const GVariantType		*variantSubtype;
+};
+
 typedef struct _XfconfSettingsBackendTreeWriteData			XfconfSettingsBackendTreeWriteData;
 struct _XfconfSettingsBackendTreeWriteData
 {
-	XfconfSettingsBackend		*backend;
-	gpointer					originTag;
-	GHashTable					*writtenKeys;
+	XfconfSettingsBackend	*backend;
+	gpointer				originTag;
+	GHashTable				*writtenKeys;
 };
 
 typedef struct _XfconfSettingsBackendTreeCollectKeysData	XfconfSettingsBackendTreeCollectKeysData;
 struct _XfconfSettingsBackendTreeCollectKeysData
 {
-	gchar						**keysList;
-	guint						index;
+	gchar					**keysList;
+	guint					index;
+};
+
+typedef struct _XfconfSettingsBackendVariantStruct			XfconfSettingsBackendVariantStruct;
+struct _XfconfSettingsBackendVariantStruct
+{
+	guint					magic;
+	gchar					*signature;
+	gchar					*value;
 };
 
 
@@ -67,128 +101,274 @@ static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 											const gchar *inKey,
 											gpointer inOriginTag);
 
-/* Find matching GType for a GVariant type */
-static GType _xfconf_settings_backend_gtype_from_gvariant_type(const GVariantType *inVariantType)
+/* Initialize variant structure */
+static void _xfconf_settings_backend_init_variant_struct(XfconfSettingsBackendVariantStruct *inStruct)
 {
-	g_return_val_if_fail(inVariantType, G_TYPE_INVALID);
+	g_return_if_fail(inStruct);
 
-	switch(g_variant_type_peek_string(inVariantType)[0])
+	/* Initialize structure */
+	inStruct->magic=XFCONF_VARIANT_STRUCT_MAGIC;
+	inStruct->signature=NULL;
+	inStruct->value=NULL;
+}
+
+/* Free variant structure */
+static void _xfconf_settings_backend_free_variant_struct(XfconfSettingsBackendVariantStruct *inStruct)
+{
+	g_return_if_fail(inStruct);
+	g_return_if_fail(inStruct->magic==XFCONF_VARIANT_STRUCT_MAGIC);
+
+	/* Free allocated resources */
+	if(inStruct->signature)
 	{
-		case G_VARIANT_CLASS_BOOLEAN:
-			return(G_TYPE_BOOLEAN);
+		g_free(inStruct->signature);
+		inStruct->signature=NULL;
+	}
 
-		case G_VARIANT_CLASS_BYTE:
-			return(G_TYPE_UCHAR);
+	if(inStruct->value)
+	{
+		g_free(inStruct->value);
+		inStruct->value=NULL;
+	}
+}
 
-		case G_VARIANT_CLASS_INT16:
-			return(XFCONF_TYPE_INT16);
+/* Find matching GType for a GVariant type */
+static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariantType *inVariantType, XfconfSettingsBackendTypeMapping *ioMapping)
+{
+	const gchar				*iter;
+	gsize					numberTypes;
 
-		case G_VARIANT_CLASS_UINT16:
-			return(XFCONF_TYPE_UINT16);
+	g_return_val_if_fail(inVariantType, FALSE);
+	g_return_val_if_fail(ioMapping, FALSE);
 
-		case G_VARIANT_CLASS_INT32:
-			return(G_TYPE_INT);
+	/* Initialize GVariant's type iterator */
+	iter=g_variant_type_peek_string(inVariantType);
+	numberTypes=g_variant_type_get_string_length(inVariantType);
 
-		case G_VARIANT_CLASS_UINT32:
-			return(G_TYPE_UINT);
+	/* Initialize mapping with invalid types */
+	ioMapping->type=G_TYPE_INVALID;
+	ioMapping->subType=G_TYPE_INVALID;
+	ioMapping->variantType=NULL;
+	ioMapping->variantSubtype=NULL;
 
-		case G_VARIANT_CLASS_INT64:
-			return(G_TYPE_INT64);
-
-		case G_VARIANT_CLASS_UINT64:
-			return(G_TYPE_INT64);
-
-		case G_VARIANT_CLASS_DOUBLE:
-			return(G_TYPE_DOUBLE);
-
-		case G_VARIANT_CLASS_STRING:
-		case G_VARIANT_CLASS_OBJECT_PATH:
-		case G_VARIANT_CLASS_SIGNATURE:
-			return(G_TYPE_STRING);
-
-		/* The following type cannot be mapped to a GValue type
-		 * processable by xfconf.
-		 */
-		case G_VARIANT_CLASS_HANDLE:
-		case G_VARIANT_CLASS_VARIANT:
-		case G_VARIANT_CLASS_MAYBE:
+	/* If GVariant's signaure is a container and it can be handled like an
+	 * array then get array type.
+	 */
+	switch(*iter)
+	{
 		case G_VARIANT_CLASS_ARRAY:
-		case G_VARIANT_CLASS_TUPLE:
-		case G_VARIANT_CLASS_DICT_ENTRY:
+			ioMapping->type=G_TYPE_ARRAY;
+			ioMapping->variantType=G_VARIANT_TYPE_ARRAY;
+			break;
+
+		/* GVariant's signature either not describes an container or it cannot
+		 * be handled like an array.
+		 */
 		default:
 			break;
 	}
 
-	return(G_TYPE_INVALID);
+	/* GVariant's signature must define exactly one type to map it to a GType
+	 * if it's not an array-like container. If it can be handled as an array-alike
+	 * then if must have exactly two type in its signature.
+	 */
+	if((ioMapping->type!=G_TYPE_INVALID && numberTypes==2) ||
+		(ioMapping->type==G_TYPE_INVALID && numberTypes==1))
+	{
+		/* Move iterator if it is array-alike */
+		if(ioMapping->type!=G_TYPE_INVALID) iter++;
+
+		/* Try mapping type */
+		switch(*iter)
+		{
+			case G_VARIANT_CLASS_BOOLEAN:
+				ioMapping->subType=G_TYPE_BOOLEAN;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_BOOLEAN;
+				break;
+
+			case G_VARIANT_CLASS_BYTE:
+				ioMapping->subType=G_TYPE_UCHAR;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_BYTE;
+				break;
+
+			case G_VARIANT_CLASS_INT16:
+				ioMapping->subType=XFCONF_TYPE_INT16;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_INT16;
+				break;
+
+			case G_VARIANT_CLASS_UINT16:
+				ioMapping->subType=XFCONF_TYPE_UINT16;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_UINT16;
+				break;
+
+			case G_VARIANT_CLASS_INT32:
+				ioMapping->subType=G_TYPE_INT;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_INT32;
+				break;
+
+			case G_VARIANT_CLASS_UINT32:
+				ioMapping->subType=G_TYPE_UINT;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_UINT32;
+				break;
+
+			case G_VARIANT_CLASS_INT64:
+				ioMapping->subType=G_TYPE_INT64;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_INT64;
+				break;
+
+			case G_VARIANT_CLASS_UINT64:
+				ioMapping->subType=G_TYPE_INT64;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_UINT64;
+				break;
+
+			case G_VARIANT_CLASS_DOUBLE:
+				ioMapping->subType=G_TYPE_DOUBLE;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_DOUBLE;
+				break;
+
+			case G_VARIANT_CLASS_STRING:
+				ioMapping->subType=G_TYPE_STRING;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_STRING;
+				break;
+
+			case G_VARIANT_CLASS_OBJECT_PATH:
+				ioMapping->subType=G_TYPE_STRING;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_OBJECT_PATH;
+				break;
+
+			case G_VARIANT_CLASS_SIGNATURE:
+				ioMapping->subType=G_TYPE_STRING;
+				ioMapping->variantSubtype=G_VARIANT_TYPE_SIGNATURE;
+				break;
+
+			/* The following type cannot be mapped to a GValue type processable
+			 * by xfconf properly. If it is array-alike then reset also its type.
+			 */
+			case G_VARIANT_CLASS_HANDLE:
+			case G_VARIANT_CLASS_VARIANT:
+			case G_VARIANT_CLASS_MAYBE:
+			case G_VARIANT_CLASS_ARRAY:
+			case G_VARIANT_CLASS_TUPLE:
+			case G_VARIANT_CLASS_DICT_ENTRY:
+			default:
+				ioMapping->type=G_TYPE_INVALID;
+				break;
+		}
+
+		/* If sub-type is set but type is invalid move sub-type to type */
+		if(ioMapping->subType!=G_TYPE_INVALID &&
+			ioMapping->type==G_TYPE_INVALID)
+		{
+			ioMapping->type=ioMapping->subType;
+			ioMapping->subType=G_TYPE_INVALID;
+
+			ioMapping->variantType=ioMapping->variantSubtype;
+			ioMapping->variantSubtype=NULL;
+		}
+	}
+
+g_message("%s: signature=%s -> type=%lu, sub-type=%lu", __func__, g_variant_type_peek_string(inVariantType), ioMapping->type, ioMapping->subType);
+
+	/* Return with success result even if no mapping could be found */
+	return(TRUE);
 }
 
 /* Store a value in xfconf */
-static gboolean _xfconf_settings_backend_write_internal(GSettingsBackend *inBackend,
+static gboolean _xfconf_settings_backend_write_internal(XfconfSettingsBackend *self,
 														const gchar *inKey,
 														GVariant *inValue,
 														gpointer inOriginTag)
 {
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-	GValue						xfconfValue=G_VALUE_INIT;
-	GType						xfconfValueType;
-	gboolean					success;
+	XfconfSettingsBackendTypeMapping		valueType;
+	gboolean								success;
 
 g_message("%s: Writing key '%s'", __func__, inKey);
 
 	/* Get GType of property value for variant */
-	xfconfValueType=_xfconf_settings_backend_gtype_from_gvariant_type(g_variant_get_type(inValue));
+	if(!_xfconf_settings_backend_gtype_from_gvariant_type(g_variant_get_type(inValue), &valueType))
+	{
+		g_critical("Failed to determine types when writting key %s.", inKey);
+		return(FALSE);
+	}
 
 	/* If variant type could not be mapped to a GType than get a string
-	 * representation of variant which will be store instead ...
+	 * representation of variant which will be store instead along with
+	 * variant's signature ...
 	 */
-	if(xfconfValueType==G_TYPE_INVALID)
+	if(valueType.type==G_TYPE_INVALID)
 	{
-		gchar					*variantString;
+		XfconfSettingsBackendVariantStruct	variantStruct;
 
-		/* Get string representation of variant */
-		variantString=g_variant_print(inValue, FALSE);
+		/* Set up value to store */
+		_xfconf_settings_backend_init_variant_struct(&variantStruct);
+		variantStruct.signature=g_variant_type_dup_string(g_variant_get_type(inValue));
+		variantStruct.value=g_variant_print(inValue, FALSE);
 
-		/* Set up property value */
-		g_value_init(&xfconfValue, G_TYPE_STRING);
-		g_value_set_string(&xfconfValue, variantString);
-		g_message("%s: Writing key '%s' with string representation '%s'", __func__, inKey, variantString);
+		/* Store value in xfconf */
+		success=xfconf_channel_set_named_struct(self->channel, inKey, XFCONF_VARIANT_STRUCT_NAME, &variantStruct);
+		g_message("%s: Writing key '%s' with variant signature '%s' %s -> %s", __func__, inKey, variantStruct.signature, success ? "successfully" : "unsuccessfully", variantStruct.value);
 
 		/* Release allocated resources */
-		g_free(variantString);
+		_xfconf_settings_backend_free_variant_struct(&variantStruct);
 	}
+		/* ... otherwise check for array ... */
+		else if(valueType.type==G_TYPE_ARRAY)
+		{
+			gsize							arraySize;
+			GPtrArray						*array;
+			gsize							i;
+			GValue							*xfconfValue;
+
+			/* Get size of array */
+			arraySize=g_variant_n_children(inValue);
+
+			/* Set up array for storing in xfconf */
+			array=g_ptr_array_sized_new(arraySize);
+			for(i=0; i<arraySize; i++)
+			{
+				xfconfValue=g_new0(GValue, 1);
+				g_dbus_gvariant_to_gvalue(g_variant_get_child_value(inValue, i), xfconfValue);
+				g_ptr_array_add(array, xfconfValue);
+			}
+
+			/* Store value in xfconf */
+			success=xfconf_channel_set_arrayv(self->channel, inKey, array);
+			g_message("%s: Writing key '%s' with variant array with %lu elements of type %lu %s", __func__, inKey, arraySize, valueType.subType, success ? "successfully" : "unsuccessfully");
+
+			/* Release allocated resources */
+			xfconf_array_free(array);
+		}
 		/* ... otherwise the variant can be simply converted */
 		else
 		{
+			GValue							xfconfValue=G_VALUE_INIT;
+
 			/* Convert variant to GValue */
 			g_dbus_gvariant_to_gvalue(inValue, &xfconfValue);
-			g_message("%s: Writing key '%s' with converted value", __func__, inKey);
+
+			/* Store value in xfconf */
+			success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
+			{
+				gchar					*valueStr;
+
+				valueStr=g_strdup_value_contents(&xfconfValue);
+				g_message("%s: Writing key '%s' with converted value %s -> %s", __func__, inKey, success ? "successfully" : "unsuccessfully", valueStr);
+				g_free(valueStr);
+			}
+
+			/* Release allocated resources */
+			g_value_unset(&xfconfValue);
 		}
-
-	/* Store value in xfconf */
-	success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
-	{
-		gchar					*valueStr;
-
-		valueStr=g_strdup_value_contents(&xfconfValue);
-		g_message("%s: Key '%s' with value '%s' -> %s", __func__, inKey, valueStr, success ? "success" : "failed");
-		g_free(valueStr);
-	}
-
-	/* Release allocated resources */
-	g_value_unset(&xfconfValue);
 
 	/* Return success result */
 	return(success);
 }
 
 /* Reset a value in xfconf */
-static gboolean _xfconf_settings_backend_reset_internal(GSettingsBackend *inBackend,
+static gboolean _xfconf_settings_backend_reset_internal(XfconfSettingsBackend *self,
 														const gchar *inKey,
 														gpointer inOriginTag)
 {
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-	gboolean					doRecursive=TRUE;
-
 	g_message("%s: Resetting value of key '%s'", __func__, inKey);
 
 	/* If key does not exists return FALSE here */
@@ -199,7 +379,7 @@ static gboolean _xfconf_settings_backend_reset_internal(GSettingsBackend *inBack
 	}
 
 	/* Reset value in xfconf */
-	xfconf_channel_reset_property(self->channel, inKey, doRecursive);
+	xfconf_channel_reset_property(self->channel, inKey, TRUE);
 
 	/* Return success result */
 	return(TRUE);
@@ -214,10 +394,9 @@ static GVariant* _xfconf_settings_backend_read(GSettingsBackend *inBackend,
 												const GVariantType *inExpectedType,
 												gboolean inDefaultValue)
 {
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-	GValue						xfconfValue=G_VALUE_INIT;
-	GType						xfconfValueType;
-	GVariant					*value;
+	XfconfSettingsBackend					*self=(XfconfSettingsBackend*)inBackend;
+	XfconfSettingsBackendTypeMapping		valueType;
+	GVariant								*value;
 
 	value=NULL;
 
@@ -226,44 +405,48 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 	/* If default value is requested return NULL */
 	if(inDefaultValue) return(NULL);
 
-	/* Get value from property */
-	if(!xfconf_channel_get_property(self->channel, inKey, &xfconfValue))
+	/* Check that requested property exists */
+	if(!xfconf_channel_has_property(self->channel, inKey))
 	{
 		g_message("%s: Key '%s' not found", __func__, inKey);
 
-		/* Release allocated resources */
-		if(G_IS_VALUE(&xfconfValue)) g_value_unset(&xfconfValue);
-
 		return(NULL);
+	}
+
+	/* Get GType of property value for variant */
+	if(!_xfconf_settings_backend_gtype_from_gvariant_type(inExpectedType, &valueType))
+	{
+		g_critical("Failed to determine types when writting key %s.", inKey);
+		return(FALSE);
 	}
 
 	/* If variant type could not be mapped to a GType than the variant
 	 * has to be created from a string representation ...
 	 */
-	xfconfValueType=_xfconf_settings_backend_gtype_from_gvariant_type(inExpectedType);
-	if(xfconfValueType==G_TYPE_INVALID)
+	if(valueType.type==G_TYPE_INVALID)
 	{
-		GError					*error;
+		XfconfSettingsBackendVariantStruct	variantStruct;
+		GError								*error;
 
 		error=NULL;
 
-		g_message("%s: Reading key '%s' by parsing string representation", __func__, inKey);
+		/* Initialize struct to get value of property at */
+		_xfconf_settings_backend_init_variant_struct(&variantStruct);
 
-		/* Property value must be a string */
-		if(!G_VALUE_HOLDS_STRING(&xfconfValue))
+		/* Get value of property */
+		if(!xfconf_channel_get_named_struct(self->channel, inKey, XFCONF_VARIANT_STRUCT_NAME, &variantStruct))
 		{
-			g_message("%s: Key '%s' has no value of type string but it is needed to convert to variant", __func__, inKey);
+			g_message("%s: Reading key '%s' failed because value could not be fetched", __func__, inKey);
 
 			/* Release allocated resources */
-			g_value_unset(&xfconfValue);
+			_xfconf_settings_backend_free_variant_struct(&variantStruct);
 
 			return(NULL);
 		}
-		g_message("%s: Reading key '%s' by parsing string representation '%s'", __func__, inKey, g_value_get_string(&xfconfValue));
 
-		/* Create variant from string representation */
-		value=g_variant_parse(NULL,
-								g_value_get_string(&xfconfValue),
+		/* Create variant from string representation for expected type */
+		value=g_variant_parse(inExpectedType,
+								variantStruct.value,
 								NULL,
 								NULL,
 								&error);
@@ -272,27 +455,93 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 			g_message("%s: Failed to create variant for key '%s' from '%s': %s",
 						__func__,
 						inKey,
-						g_value_get_string(&xfconfValue),
+						variantStruct.value,
 						error ? error->message : "Unknown error");
 
 			/* Release allocated resources */
 			if(value) g_variant_unref(value);
 			if(error) g_error_free(error);
-			g_value_unset(&xfconfValue);
+			_xfconf_settings_backend_free_variant_struct(&variantStruct);
 
 			return(NULL);
 		}
+
+		{
+			gchar					*valueStr;
+
+			valueStr=g_variant_print(value, FALSE);
+			g_message("%s: Reading key '%s' with signature '%s' -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
+			g_free(valueStr);
+		}
+
+		/* Release allocated resources */
+		_xfconf_settings_backend_free_variant_struct(&variantStruct);
 	}
+		/* ... otherwise check for array ... */
+		else if(valueType.type==G_TYPE_ARRAY)
+		{
+			GPtrArray						*array;
+			gsize							arraySize;
+			GVariant						**elements;
+			gsize							i;
+
+			/* Get array from xfconf */
+			array=xfconf_channel_get_arrayv(self->channel, inKey);
+			if(array)
+			{
+				/* Get size of array */
+				arraySize=array->len;
+
+				/* Set up array for storing GVariants */
+				elements=g_new0(GVariant*, arraySize);
+				for(i=0; i<arraySize; i++)
+				{
+					elements[i]=g_dbus_gvalue_to_gvariant((GValue*)g_ptr_array_index(array, i), valueType.variantSubtype);
+				}
+
+				/* Get final GVariant array */
+				value=g_variant_new_array(valueType.variantSubtype, elements, arraySize);
+				{
+					gchar					*valueStr;
+
+					valueStr=g_variant_print(value, FALSE);
+					g_message("%s: Reading key '%s' with signature '%s' from variant array -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
+					g_free(valueStr);
+				}
+
+				/* Release allocated resources */
+				xfconf_array_free(array);
+			}
+		}
 		/* ... otherwise it can be simply converted */
 		else
 		{
+			GValue							xfconfValue=G_VALUE_INIT;
+
+			/* Get stored value of property */
+			if(!xfconf_channel_get_property(self->channel, inKey, &xfconfValue))
+			{
+				g_message("%s: Key '%s' not found", __func__, inKey);
+
+				/* Release allocated resources */
+				if(G_IS_VALUE(&xfconfValue)) g_value_unset(&xfconfValue);
+
+				return(NULL);
+			}
+
 			/* Convert property value to variant */
 			value=g_dbus_gvalue_to_gvariant(&xfconfValue, inExpectedType);
-			g_message("%s: Reading key '%s' by conversion", __func__, inKey);
-		}
+			{
+				gchar					*valueStr;
 
-	/* Release allocated resources */
-	g_value_unset(&xfconfValue);
+				valueStr=g_variant_print(value, FALSE);
+				g_message("%s: Reading key '%s' with signature '%s' by conversion -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
+				g_free(valueStr);
+			}
+
+			/* Release allocated resources */
+			g_value_unset(&xfconfValue);
+		}
 
 	/* Return variant created from property value */
 	return(value);
@@ -309,16 +558,16 @@ static gboolean _xfconf_settings_backend_write(GSettingsBackend *inBackend,
 	/* Write value to xfconf */
 	if(inValue)
 	{
-		success=_xfconf_settings_backend_write_internal(inBackend,
-															inKey,
-															inValue,
-															inOriginTag);
+		success=_xfconf_settings_backend_write_internal(XFCONF_SETTINGS_BACKEND(inBackend),
+														inKey,
+														inValue,
+														inOriginTag);
 	}
 		else
 		{
-			success=_xfconf_settings_backend_reset_internal(inBackend,
-																inKey,
-																inOriginTag);
+			success=_xfconf_settings_backend_reset_internal(XFCONF_SETTINGS_BACKEND(inBackend),
+															inKey,
+															inOriginTag);
 		}
 
 	/* Emit 'changed' signal if writing was successful */
@@ -351,14 +600,14 @@ static gboolean _xfconf_settings_backend_write_tree_callback(gpointer inKey,
 	 */
 	if(variant)
 	{
-		success=_xfconf_settings_backend_write_internal((GSettingsBackend*)data->backend,
+		success=_xfconf_settings_backend_write_internal(XFCONF_SETTINGS_BACKEND(data->backend),
 														key,
 														variant,
 														data->originTag);
 	}
 		else
 		{
-			success=_xfconf_settings_backend_reset_internal((GSettingsBackend*)data->backend,
+			success=_xfconf_settings_backend_reset_internal(XFCONF_SETTINGS_BACKEND(data->backend),
 															key,
 															data->originTag);
 		}
@@ -467,7 +716,7 @@ static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 	g_message("%s: Resetting value of key '%s'", __func__, inKey);
 
 	/* Reset value in xfconf */
-	success=_xfconf_settings_backend_reset_internal(inBackend, inKey, inOriginTag);
+	success=_xfconf_settings_backend_reset_internal(self, inKey, inOriginTag);
 
 	/* Emit 'changed' signal if resetting was successful */
 	if(success) g_settings_backend_changed(inBackend, inKey, inOriginTag);
@@ -485,32 +734,6 @@ g_message("%s: %s -> %s", __func__, inKey, isWritable ? "writable" : "read-only"
 	return(isWritable);
 }
 
-/* Subscribe */
-static void _xfconf_settings_backend_subscribe(GSettingsBackend *inBackend,
-												const gchar *inKey)
-{
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-
-	/* TODO: I do not know what to do here :( */
-	g_message("%s: Subscribe '%s' - not yet implemented!", __func__, inKey);
-}
-
-/* Unsubscribe */
-static void _xfconf_settings_backend_unsubscribe(GSettingsBackend *inBackend,
-													const gchar *inKey)
-{
-	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
-
-	/* TODO: I do not know what to do here :( */
-	g_message("%s: Unsubscribe '%s' - not yet implemented!", __func__, inKey);
-}
-
-/* Sync */
-static void _xfconf_settings_backend_sync(GSettingsBackend *inBackend)
-{
-	/* Do nothing - is always synced */
-	g_message("%s: Sync not needed", __func__);
-}
 
 /* IMPLEMENTATION: GObject */
 
@@ -519,12 +742,14 @@ static void _xfconf_settings_backend_finalize(GObject *inObject)
 {
 	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inObject;
 
+	/* Release allocated resources */
 	if(self->channel)
 	{
 		g_object_unref(self->channel);
 		self->channel=NULL;
 	}
 
+	/* Call parent class virtual function */
 	G_OBJECT_CLASS(xfconf_settings_backend_parent_class)->finalize(inObject);
 }
 
@@ -532,21 +757,19 @@ static void _xfconf_settings_backend_finalize(GObject *inObject)
  * Override functions in parent classes and define properties
  * and signals
  */
-static void xfconf_settings_backend_class_init(GSettingsBackendClass *klass)
+static void xfconf_settings_backend_class_init(XfconfSettingsBackendClass *klass)
 {
-	GObjectClass	*gobjectClass=G_OBJECT_CLASS(klass);
+	GSettingsBackendClass	*backendClass=G_SETTINGS_BACKEND_CLASS(klass);
+	GObjectClass			*gobjectClass=G_OBJECT_CLASS(klass);
 
 	/* Override functions */
 	gobjectClass->finalize=_xfconf_settings_backend_finalize;
 
-	klass->read=_xfconf_settings_backend_read;
-	klass->write=_xfconf_settings_backend_write;
-	klass->write_tree=_xfconf_settings_backend_write_tree;
-	klass->reset=_xfconf_settings_backend_reset;
-	klass->get_writable=_xfconf_settings_backend_get_writable;
-	klass->subscribe=_xfconf_settings_backend_subscribe;
-	klass->unsubscribe=_xfconf_settings_backend_unsubscribe;
-	klass->sync=_xfconf_settings_backend_sync;
+	backendClass->read=_xfconf_settings_backend_read;
+	backendClass->write=_xfconf_settings_backend_write;
+	backendClass->write_tree=_xfconf_settings_backend_write_tree;
+	backendClass->reset=_xfconf_settings_backend_reset;
+	backendClass->get_writable=_xfconf_settings_backend_get_writable;
 }
 
 /* Object initialization
@@ -558,11 +781,18 @@ static void xfconf_settings_backend_init(XfconfSettingsBackend *self)
 	self->channel=xfconf_channel_new(XFCONF_SETTINGS_CHANNEL);
 }
 
+
+/* IMPLEMENTATION: GIOModule */
+
+/* Module loading and initialization */
 void g_io_module_load(GIOModule *inModule)
 {
 	GError		*error;
+	GType		xfconfVariantStruct[]={ G_TYPE_UINT, G_TYPE_STRING, G_TYPE_STRING };
 
 	error=NULL;
+
+	/* Initialize xfconf */
 	if(!xfconf_init(&error))
 	{
 		g_critical("Could not initialize xfconf: %s", error->message);
@@ -570,20 +800,30 @@ void g_io_module_load(GIOModule *inModule)
 		return;
 	}
 
+	/* Register GSettings backend */
 	g_type_module_use(G_TYPE_MODULE(inModule));
 	g_io_extension_point_implement(G_SETTINGS_BACKEND_EXTENSION_POINT_NAME,
 									xfconf_settings_backend_get_type(),
 									"xfconf",
 									-1);
+
+	/* Register named structs at xfconf */
+	xfconf_named_struct_register(XFCONF_VARIANT_STRUCT_NAME,
+									G_N_ELEMENTS(xfconfVariantStruct),
+									xfconfVariantStruct);
+
 	g_message("Module loaded: xfconf-gsettings");
 }
 
+/* Module unloading */
 void g_io_module_unload(GIOModule *inModule)
 {
+	/* Shutdown xfconf */
 	xfconf_shutdown();
 	g_message("Module unloaded: xfconf-gsettings");
 }
 
+/* Module query */
 gchar** g_io_module_query(void)
 {
 	return(g_strsplit(G_SETTINGS_BACKEND_EXTENSION_POINT_NAME, "!", 0));
