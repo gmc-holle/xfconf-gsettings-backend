@@ -27,12 +27,20 @@
 
 #include <xfconf/xfconf.h>
 
+/* If defined variants are stored as an array containing magic number,
+ * signature and value. If it is not defined variants are stored just
+ * as a serialized string.
+ */
+#undef STORE_COMPLEX_VARIANTS
+
 
 /* Definitions */
 #define XFCONF_SETTINGS_CHANNEL			"xfconf-gsettings"
+
+#ifdef STORE_COMPLEX_VARIANTS
 #define XFCONF_VARIANT_STRUCT_MAGIC		((guint32)('G' << 24 | 'V' << 16 | 'a' << 8 | 'r'))
 #define XFCONF_VARIANT_STRUCT_NAME		"xfconf-gsettings-variant-struct"
-
+#endif
 
 /* Define this class in GObject system */
 typedef struct _XfconfSettingsBackendClass					XfconfSettingsBackendClass;
@@ -87,6 +95,7 @@ struct _XfconfSettingsBackendTreeCollectKeysData
 	guint					index;
 };
 
+#ifdef STORE_COMPLEX_VARIANTS
 typedef struct _XfconfSettingsBackendVariantStruct			XfconfSettingsBackendVariantStruct;
 struct _XfconfSettingsBackendVariantStruct
 {
@@ -94,6 +103,7 @@ struct _XfconfSettingsBackendVariantStruct
 	gchar					*signature;
 	gchar					*value;
 };
+#endif
 
 
 /* Forward declarations */
@@ -101,6 +111,7 @@ static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 											const gchar *inKey,
 											gpointer inOriginTag);
 
+#ifdef STORE_COMPLEX_VARIANTS
 /* Initialize variant structure */
 static void _xfconf_settings_backend_init_variant_struct(XfconfSettingsBackendVariantStruct *inStruct)
 {
@@ -131,6 +142,7 @@ static void _xfconf_settings_backend_free_variant_struct(XfconfSettingsBackendVa
 		inStruct->value=NULL;
 	}
 }
+#endif
 
 /* Find matching GType for a GVariant type */
 static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariantType *inVariantType, XfconfSettingsBackendTypeMapping *ioMapping)
@@ -297,6 +309,7 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 	 */
 	if(valueType.type==G_TYPE_INVALID)
 	{
+#ifdef STORE_COMPLEX_VARIANTS
 		XfconfSettingsBackendVariantStruct	variantStruct;
 
 		/* Set up value to store */
@@ -310,6 +323,31 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 
 		/* Release allocated resources */
 		_xfconf_settings_backend_free_variant_struct(&variantStruct);
+#else
+		gchar								*variantString;
+		GValue								xfconfValue=G_VALUE_INIT;
+
+		/* Get string representation of variant */
+		variantString=g_variant_print(inValue, FALSE);
+
+		/* Set up property value */
+		g_value_init(&xfconfValue, G_TYPE_STRING);
+		g_value_set_string(&xfconfValue, variantString);
+
+		/* Store value in xfconf */
+		success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
+		{
+			gchar					*valueStr;
+
+			valueStr=g_strdup_value_contents(&xfconfValue);
+			g_message("%s: Writing key '%s' in serialized form %s -> %s", __func__, inKey, success ? "successfully" : "unsuccessfully", valueStr);
+			g_free(valueStr);
+		}
+
+		/* Release allocated resources */
+		g_value_unset(&xfconfValue);
+		g_free(variantString);
+#endif
 	}
 		/* ... otherwise check for array ... */
 		else if(valueType.type==G_TYPE_ARRAY)
@@ -425,6 +463,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 	 */
 	if(valueType.type==G_TYPE_INVALID)
 	{
+#ifdef STORE_COMPLEX_VARIANTS
 		XfconfSettingsBackendVariantStruct	variantStruct;
 		GError								*error;
 
@@ -476,6 +515,67 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 
 		/* Release allocated resources */
 		_xfconf_settings_backend_free_variant_struct(&variantStruct);
+#else
+		GValue								xfconfValue=G_VALUE_INIT;
+		GError								*error;
+
+		error=NULL;
+
+		/* Get stored value of property */
+		if(!xfconf_channel_get_property(self->channel, inKey, &xfconfValue))
+		{
+			g_message("%s: Key '%s' not found", __func__, inKey);
+
+			/* Release allocated resources */
+			if(G_IS_VALUE(&xfconfValue)) g_value_unset(&xfconfValue);
+
+			return(NULL);
+		}
+
+		/* Property value must be a string */
+		if(!G_VALUE_HOLDS_STRING(&xfconfValue))
+		{
+			g_message("%s: Key '%s' has no value of type string but it is needed to convert to variant", __func__, inKey);
+
+			/* Release allocated resources */
+			g_value_unset(&xfconfValue);
+
+			return(NULL);
+		}
+
+		/* Create variant from string representation for expected type */
+		value=g_variant_parse(inExpectedType,
+								g_value_get_string(&xfconfValue),
+								NULL,
+								NULL,
+								&error);
+		if(!value || error)
+		{
+			g_message("%s: Failed to create variant for key '%s' from '%s': %s",
+						__func__,
+						inKey,
+						g_value_get_string(&xfconfValue),
+						error ? error->message : "Unknown error");
+
+			/* Release allocated resources */
+			g_value_unset(&xfconfValue);
+			if(value) g_variant_unref(value);
+			if(error) g_error_free(error);
+
+			return(NULL);
+		}
+
+		{
+			gchar					*valueStr;
+
+			valueStr=g_variant_print(value, FALSE);
+			g_message("%s: Reading key '%s' from serialized form -> %s", __func__, inKey, valueStr);
+			g_free(valueStr);
+		}
+
+		/* Release allocated resources */
+		g_value_unset(&xfconfValue);
+#endif
 	}
 		/* ... otherwise check for array ... */
 		else if(valueType.type==G_TYPE_ARRAY)
@@ -788,7 +888,9 @@ static void xfconf_settings_backend_init(XfconfSettingsBackend *self)
 void g_io_module_load(GIOModule *inModule)
 {
 	GError		*error;
+#ifdef STORE_COMPLEX_VARIANTS
 	GType		xfconfVariantStruct[]={ G_TYPE_UINT, G_TYPE_STRING, G_TYPE_STRING };
+#endif
 
 	error=NULL;
 
@@ -807,12 +909,18 @@ void g_io_module_load(GIOModule *inModule)
 									"xfconf",
 									-1);
 
+#ifdef STORE_COMPLEX_VARIANTS
 	/* Register named structs at xfconf */
 	xfconf_named_struct_register(XFCONF_VARIANT_STRUCT_NAME,
 									G_N_ELEMENTS(xfconfVariantStruct),
 									xfconfVariantStruct);
+#endif
 
-	g_message("Module loaded: xfconf-gsettings");
+#ifdef STORE_COMPLEX_VARIANTS
+	g_message("Module loaded: xfconf-gsettings (storing variants as complex arrays)");
+#else
+	g_message("Module loaded: xfconf-gsettings (storing simple serialized variants)");
+#endif
 }
 
 /* Module unloading */
