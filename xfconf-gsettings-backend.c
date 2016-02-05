@@ -33,6 +33,9 @@
  */
 #undef STORE_COMPLEX_VARIANTS
 
+/* If defined print debug message. Do not define for silence ;) */
+#undef DEBUG
+
 
 /* Definitions */
 #define XFCONF_SETTINGS_CHANNEL			"xfconf-gsettings"
@@ -110,6 +113,32 @@ struct _XfconfSettingsBackendVariantStruct
 static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 											const gchar *inKey,
 											gpointer inOriginTag);
+
+#ifdef DEBUG
+void _xfconf_settings_backend_debug(const gchar *inFormat, ...) G_GNUC_PRINTF(1, 2);
+
+/* Print debug messages */
+void _xfconf_settings_backend_debug(const gchar *inFormat, ...)
+{
+	gchar			*text;
+	va_list			args;
+
+	g_return_if_fail(inFormat && *inFormat);
+
+	/* Build formatted text to set */
+	va_start(args, inFormat);
+	text=g_strdup_vprintf(inFormat, args);
+	va_end(args);
+
+	/* Show debug message */
+	g_print("[xfconf-settings-backend debug]: %s\n", text);
+
+	/* Release allocated resources */
+	g_free(text);
+}
+#else
+#define _xfconf_settings_backend_debug(inFormat, ...)
+#endif
 
 #ifdef STORE_COMPLEX_VARIANTS
 /* Initialize variant structure */
@@ -279,9 +308,11 @@ static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariant
 		}
 	}
 
-g_message("%s: signature=%s -> type=%lu, sub-type=%lu", __func__, g_variant_type_peek_string(inVariantType), ioMapping->type, ioMapping->subType);
-
 	/* Return with success result even if no mapping could be found */
+	_xfconf_settings_backend_debug("GVariant's signature '%s' resolved to type=%s and sub-type=%s",
+									g_variant_type_peek_string(inVariantType),
+									g_type_name(ioMapping->type),
+									g_type_name(ioMapping->subType));
 	return(TRUE);
 }
 
@@ -293,8 +324,6 @@ static gboolean _xfconf_settings_backend_write_internal(XfconfSettingsBackend *s
 {
 	XfconfSettingsBackendTypeMapping		valueType;
 	gboolean								success;
-
-g_message("%s: Writing key '%s'", __func__, inKey);
 
 	/* Get GType of property value for variant */
 	if(!_xfconf_settings_backend_gtype_from_gvariant_type(g_variant_get_type(inValue), &valueType))
@@ -319,7 +348,6 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 
 		/* Store value in xfconf */
 		success=xfconf_channel_set_named_struct(self->channel, inKey, XFCONF_VARIANT_STRUCT_NAME, &variantStruct);
-		g_message("%s: Writing key '%s' with variant signature '%s' %s -> %s", __func__, inKey, variantStruct.signature, success ? "successfully" : "unsuccessfully", variantStruct.value);
 
 		/* Release allocated resources */
 		_xfconf_settings_backend_free_variant_struct(&variantStruct);
@@ -336,13 +364,6 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 
 		/* Store value in xfconf */
 		success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
-		{
-			gchar					*valueStr;
-
-			valueStr=g_strdup_value_contents(&xfconfValue);
-			g_message("%s: Writing key '%s' in serialized form %s -> %s", __func__, inKey, success ? "successfully" : "unsuccessfully", valueStr);
-			g_free(valueStr);
-		}
 
 		/* Release allocated resources */
 		g_value_unset(&xfconfValue);
@@ -371,7 +392,6 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 
 			/* Store value in xfconf */
 			success=xfconf_channel_set_arrayv(self->channel, inKey, array);
-			g_message("%s: Writing key '%s' with variant array with %lu elements of type %lu %s", __func__, inKey, arraySize, valueType.subType, success ? "successfully" : "unsuccessfully");
 
 			/* Release allocated resources */
 			xfconf_array_free(array);
@@ -386,19 +406,15 @@ g_message("%s: Writing key '%s'", __func__, inKey);
 
 			/* Store value in xfconf */
 			success=xfconf_channel_set_property(self->channel, inKey, &xfconfValue);
-			{
-				gchar					*valueStr;
-
-				valueStr=g_strdup_value_contents(&xfconfValue);
-				g_message("%s: Writing key '%s' with converted value %s -> %s", __func__, inKey, success ? "successfully" : "unsuccessfully", valueStr);
-				g_free(valueStr);
-			}
 
 			/* Release allocated resources */
 			g_value_unset(&xfconfValue);
 		}
 
 	/* Return success result */
+	_xfconf_settings_backend_debug("Wrote key '%s' %s",
+									inKey,
+									success ? "successfully" : "unsuccessfully");
 	return(success);
 }
 
@@ -407,12 +423,10 @@ static gboolean _xfconf_settings_backend_reset_internal(XfconfSettingsBackend *s
 														const gchar *inKey,
 														gpointer inOriginTag)
 {
-	g_message("%s: Resetting value of key '%s'", __func__, inKey);
-
 	/* If key does not exists return FALSE here */
 	if(!xfconf_channel_has_property(self->channel, inKey))
 	{
-		g_message("%s: Cannot reset value of non-existing key '%s'", __func__, inKey);
+		_xfconf_settings_backend_debug("Cannot reset non-existing key '%s'", inKey);
 		return(FALSE);
 	}
 
@@ -438,7 +452,6 @@ static GVariant* _xfconf_settings_backend_read(GSettingsBackend *inBackend,
 
 	value=NULL;
 
-g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, inKey, inDefaultValue ? "yes" : "no", g_variant_type_peek_string(inExpectedType));
 
 	/* If default value is requested return NULL */
 	if(inDefaultValue) return(NULL);
@@ -446,8 +459,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 	/* Check that requested property exists */
 	if(!xfconf_channel_has_property(self->channel, inKey))
 	{
-		g_message("%s: Key '%s' not found", __func__, inKey);
-
+		_xfconf_settings_backend_debug("Cannot read non-existing key '%s'", inKey);
 		return(NULL);
 	}
 
@@ -475,7 +487,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 		/* Get value of property */
 		if(!xfconf_channel_get_named_struct(self->channel, inKey, XFCONF_VARIANT_STRUCT_NAME, &variantStruct))
 		{
-			g_message("%s: Reading key '%s' failed because value could not be fetched", __func__, inKey);
+			g_critical("Failed to get complex array to determine value for key '%s'", inKey);
 
 			/* Release allocated resources */
 			_xfconf_settings_backend_free_variant_struct(&variantStruct);
@@ -491,8 +503,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 								&error);
 		if(!value || error)
 		{
-			g_message("%s: Failed to create variant for key '%s' from '%s': %s",
-						__func__,
+			g_critical("Failed to parse variant for key '%s' from '%s': %s",
 						inKey,
 						variantStruct.value,
 						error ? error->message : "Unknown error");
@@ -503,14 +514,6 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 			_xfconf_settings_backend_free_variant_struct(&variantStruct);
 
 			return(NULL);
-		}
-
-		{
-			gchar					*valueStr;
-
-			valueStr=g_variant_print(value, FALSE);
-			g_message("%s: Reading key '%s' with signature '%s' -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
-			g_free(valueStr);
 		}
 
 		/* Release allocated resources */
@@ -524,7 +527,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 		/* Get stored value of property */
 		if(!xfconf_channel_get_property(self->channel, inKey, &xfconfValue))
 		{
-			g_message("%s: Key '%s' not found", __func__, inKey);
+			g_critical("Failed to get value for key '%s'", inKey);
 
 			/* Release allocated resources */
 			if(G_IS_VALUE(&xfconfValue)) g_value_unset(&xfconfValue);
@@ -535,7 +538,9 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 		/* Property value must be a string */
 		if(!G_VALUE_HOLDS_STRING(&xfconfValue))
 		{
-			g_message("%s: Key '%s' has no value of type string but it is needed to convert to variant", __func__, inKey);
+			g_critical("Failed to parse variant for key '%s': %s",
+						inKey,
+						"Value is not a string");
 
 			/* Release allocated resources */
 			g_value_unset(&xfconfValue);
@@ -551,8 +556,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 								&error);
 		if(!value || error)
 		{
-			g_message("%s: Failed to create variant for key '%s' from '%s': %s",
-						__func__,
+			g_critical("Failed to parse variant for key '%s' from '%s': %s",
 						inKey,
 						g_value_get_string(&xfconfValue),
 						error ? error->message : "Unknown error");
@@ -563,14 +567,6 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 			if(error) g_error_free(error);
 
 			return(NULL);
-		}
-
-		{
-			gchar					*valueStr;
-
-			valueStr=g_variant_print(value, FALSE);
-			g_message("%s: Reading key '%s' from serialized form -> %s", __func__, inKey, valueStr);
-			g_free(valueStr);
 		}
 
 		/* Release allocated resources */
@@ -601,13 +597,6 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 
 				/* Get final GVariant array */
 				value=g_variant_new_array(valueType.variantSubtype, elements, arraySize);
-				{
-					gchar					*valueStr;
-
-					valueStr=g_variant_print(value, FALSE);
-					g_message("%s: Reading key '%s' with signature '%s' from variant array -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
-					g_free(valueStr);
-				}
 
 				/* Release allocated resources */
 				xfconf_array_free(array);
@@ -621,7 +610,7 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 			/* Get stored value of property */
 			if(!xfconf_channel_get_property(self->channel, inKey, &xfconfValue))
 			{
-				g_message("%s: Key '%s' not found", __func__, inKey);
+				g_critical("Failed to get value for key '%s'", inKey);
 
 				/* Release allocated resources */
 				if(G_IS_VALUE(&xfconfValue)) g_value_unset(&xfconfValue);
@@ -631,19 +620,15 @@ g_message("%s: Reading key '%s' -> default=%s, expected type '%s'", __func__, in
 
 			/* Convert property value to variant */
 			value=g_dbus_gvalue_to_gvariant(&xfconfValue, inExpectedType);
-			{
-				gchar					*valueStr;
-
-				valueStr=g_variant_print(value, FALSE);
-				g_message("%s: Reading key '%s' with signature '%s' by conversion -> %s", __func__, inKey, g_variant_type_peek_string(inExpectedType), valueStr);
-				g_free(valueStr);
-			}
 
 			/* Release allocated resources */
 			g_value_unset(&xfconfValue);
 		}
 
 	/* Return variant created from property value */
+	_xfconf_settings_backend_debug("Read key '%s' %s",
+									inKey,
+									value ? "successfully" : "unsuccessfully");
 	return(value);
 }
 
@@ -736,7 +721,6 @@ static void _xfconf_settings_backend_write_tree_collect_modified_keys(gpointer i
 
 	/* Add key to string array */
 	data->keysList[data->index]=g_strdup(key);
-g_message("%s: Index=%d -> %s", __func__, data->index, data->keysList[data->index]);
 	data->index++;
 }
 
@@ -754,10 +738,9 @@ static gboolean _xfconf_settings_backend_write_tree(GSettingsBackend *inBackend,
 	treeSize=g_tree_nnodes(inTree);
 	if(treeSize==0)
 	{
-		g_message("%s: Empty tree", __func__);
+		_xfconf_settings_backend_debug("Do not write tree because tree is empty");
 		return(TRUE);
 	}
-	g_message("%s: Writing tree with %d nodes", __func__, treeSize);
 
 	/* Write each value to xfconf */
 	writeData.backend=self;
@@ -796,12 +779,14 @@ static gboolean _xfconf_settings_backend_write_tree(GSettingsBackend *inBackend,
 
 		g_strfreev(collectKeysData.keysList);
 	}
-	g_message("%s: Modified %d keys", __func__, modifiedKeysCount);
 
 	/* Release allocated resources */
 	g_hash_table_unref(writeData.writtenKeys);
 
 	/* Return success result */
+	_xfconf_settings_backend_debug("Wrote tree with %d nodes and modified %d keys",
+									treeSize,
+									modifiedKeysCount);
 	return(TRUE);
 }
 
@@ -812,8 +797,6 @@ static void _xfconf_settings_backend_reset(GSettingsBackend *inBackend,
 {
 	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
 	gboolean					success;
-
-	g_message("%s: Resetting value of key '%s'", __func__, inKey);
 
 	/* Reset value in xfconf */
 	success=_xfconf_settings_backend_reset_internal(self, inKey, inOriginTag);
@@ -829,8 +812,13 @@ static gboolean _xfconf_settings_backend_get_writable(GSettingsBackend *inBacken
 	XfconfSettingsBackend		*self=(XfconfSettingsBackend*)inBackend;
 	gboolean					isWritable;
 
+	/* Determine if key is writable */
 	isWritable=!xfconf_channel_is_property_locked(self->channel, inKey);
-g_message("%s: %s -> %s", __func__, inKey, isWritable ? "writable" : "read-only");
+
+	/* Return result */
+	_xfconf_settings_backend_debug("Key '%s' is %s",
+									inKey,
+									isWritable ? "writable" : "read-only");
 	return(isWritable);
 }
 
@@ -917,9 +905,9 @@ void g_io_module_load(GIOModule *inModule)
 #endif
 
 #ifdef STORE_COMPLEX_VARIANTS
-	g_message("Module loaded: xfconf-gsettings (storing variants as complex arrays)");
+	_xfconf_settings_backend_debug("Module loaded: xfconf-gsettings (storing variants as complex arrays)");
 #else
-	g_message("Module loaded: xfconf-gsettings (storing simple serialized variants)");
+	_xfconf_settings_backend_debug("Module loaded: xfconf-gsettings (storing simple serialized variants)");
 #endif
 }
 
@@ -928,7 +916,8 @@ void g_io_module_unload(GIOModule *inModule)
 {
 	/* Shutdown xfconf */
 	xfconf_shutdown();
-	g_message("Module unloaded: xfconf-gsettings");
+
+	_xfconf_settings_backend_debug("Module unloaded: xfconf-gsettings");
 }
 
 /* Module query */
