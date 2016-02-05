@@ -34,7 +34,7 @@
 #undef STORE_COMPLEX_VARIANTS
 
 /* If defined print debug message. Do not define for silence ;) */
-#undef DEBUG
+#define DEBUG
 
 
 /* Definitions */
@@ -193,13 +193,17 @@ static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariant
 	ioMapping->variantSubtype=NULL;
 
 	/* If GVariant's signaure is a container and it can be handled like an
-	 * array then get array type.
+	 * array then get array type but it must have only two types in its
+	 * signature *exactly*.
 	 */
 	switch(*iter)
 	{
 		case G_VARIANT_CLASS_ARRAY:
-			ioMapping->type=G_TYPE_ARRAY;
-			ioMapping->variantType=G_VARIANT_TYPE_ARRAY;
+			if(numberTypes==2)
+			{
+				ioMapping->type=G_TYPE_ARRAY;
+				ioMapping->variantType=G_VARIANT_TYPE_ARRAY;
+			}
 			break;
 
 		/* GVariant's signature either not describes an container or it cannot
@@ -293,6 +297,7 @@ static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariant
 			case G_VARIANT_CLASS_DICT_ENTRY:
 			default:
 				ioMapping->type=G_TYPE_INVALID;
+				ioMapping->variantType=NULL;
 				break;
 		}
 
@@ -309,8 +314,9 @@ static gboolean _xfconf_settings_backend_gtype_from_gvariant_type(const GVariant
 	}
 
 	/* Return with success result even if no mapping could be found */
-	_xfconf_settings_backend_debug("GVariant's signature '%s' resolved to type=%s and sub-type=%s",
+	_xfconf_settings_backend_debug("GVariant's signature '%s' with %lu elements resolved to type %s and sub-type %s",
 									g_variant_type_peek_string(inVariantType),
+									numberTypes,
 									g_type_name(ioMapping->type),
 									g_type_name(ioMapping->subType));
 	return(TRUE);
@@ -371,7 +377,7 @@ static gboolean _xfconf_settings_backend_write_internal(XfconfSettingsBackend *s
 #endif
 	}
 		/* ... otherwise check for array ... */
-		else if(valueType.type==G_TYPE_ARRAY)
+		else if(valueType.type==G_TYPE_ARRAY && valueType.subType!=G_TYPE_INVALID)
 		{
 			gsize							arraySize;
 			GPtrArray						*array;
@@ -574,7 +580,7 @@ static GVariant* _xfconf_settings_backend_read(GSettingsBackend *inBackend,
 #endif
 	}
 		/* ... otherwise check for array ... */
-		else if(valueType.type==G_TYPE_ARRAY)
+		else if(valueType.type==G_TYPE_ARRAY && valueType.subType!=G_TYPE_INVALID)
 		{
 			GPtrArray						*array;
 			gsize							arraySize;
